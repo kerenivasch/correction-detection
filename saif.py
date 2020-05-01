@@ -109,6 +109,7 @@ def load_data():
         snd_transcript_vec = all_snd_transcript_vectors[idx]
         transcript_vec = np.concatenate((np.abs(transcript_vec - snd_transcript_vec), transcript_vec * snd_transcript_vec))
 
+        #load agent execution flag (0=executed, 1=not executed):
         output = mapping["output"][idx]
 
         emotions_vec = all_fst_wav_vectors[idx]
