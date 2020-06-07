@@ -16,55 +16,57 @@ import skipthoughts.skipthoughts as st
 vad = webrtcvad.Vad()
 os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
-kfold = 5
+kfold = 5   #number of cross-validation folds
 test_frac = 1/kfold
-categories = 3
-voice_feat = 600
-transcript_feat = 9600
+categories = 3  #the categories are: new command, command correction, and asr correction
+voice_feat = 2*300   #size of two concatenated encoded voice vectors
+transcript_feat = 2*4800   #size of two concatenated encoded transcript vectors
 minibatch_size = 128
 graph_seed = 1234
-graph_keep_prob = 0.5
+graph_keep_prob = 0.5   #for dropout
 
-
-def get_activations(clf, X):
-
-    hidden_layer_sizes = clf.hidden_layer_sizes
-    if not hasattr(hidden_layer_sizes, "__iter__"):
-        hidden_layer_sizes = [hidden_layer_sizes]
-    hidden_layer_sizes = list(hidden_layer_sizes)
-    layer_units = [np.shape(X)[1]] + hidden_layer_sizes +  [clf.n_outputs_]
-    activations = [X]
-    for i in range(clf.n_layers_ - 1):
-        activations.append(np.empty((np.shape(X)[0], layer_units[i + 1])))
-    clf._forward_pass(activations)
-    return activations[-2]
 
 def extract_feature(file_name, mfcc, chroma, mel):
     """From DataFlair Team Speech Emotion Recognition with librosa mini project"""
     with soundfile.SoundFile(file_name) as sound_file:
 
         X = sound_file.read(dtype="float32")
-        sample_rate=sound_file.samplerate
+        sample_rate = sound_file.samplerate
 
         if chroma:
-            stft=np.abs(librosa.stft(X))
-        result=np.array([])
+            stft = np.abs(librosa.stft(X))
+        result = np.array([])
         if mfcc:
-            mfccs=np.mean(librosa.feature.mfcc(y=X, sr=sample_rate, n_mfcc=40).T, axis=0)
-            result=np.hstack((result, mfccs))
+            mfccs = np.mean(librosa.feature.mfcc(y=X, sr=sample_rate, n_mfcc=40).T, axis=0)
+            result = np.hstack((result, mfccs))
         if chroma:
-            chroma=np.mean(librosa.feature.chroma_stft(S=stft, sr=sample_rate).T,axis=0)
-            result=np.hstack((result, chroma))
+            chroma = np.mean(librosa.feature.chroma_stft(S=stft, sr=sample_rate).T, axis=0)
+            result = np.hstack((result, chroma))
         if mel:
-            mel=np.mean(librosa.feature.melspectrogram(X, sr=sample_rate).T,axis=0)
-            result=np.hstack((result, mel))
+            mel = np.mean(librosa.feature.melspectrogram(X, sr=sample_rate).T, axis=0)
+            result = np.hstack((result, mel))
 
     return result
 
 def get_emotions_vec(wav_name):
     return extract_feature("./wav/" + wav_name, True, True, True)
 
+def get_activations(model, feature_vec):
+    """Apply the DataFlair emotion recognition model on the given wav feature vector and return the next-to-last layer"""
+    hidden_layer_sizes = model.hidden_layer_sizes
+    if not hasattr(hidden_layer_sizes, "__iter__"):
+        hidden_layer_sizes = [hidden_layer_sizes]
+    hidden_layer_sizes = list(hidden_layer_sizes)
+    layer_units = [np.shape(feature_vec)[1]] + hidden_layer_sizes + [model.n_outputs_]
+    activations = [feature_vec]
+    for i in range(model.n_layers_ - 1):
+        activations.append(np.empty((np.shape(feature_vec)[0], layer_units[i + 1])))
+    model._forward_pass(activations)
+    return activations[-2]
+
+
 def count_frames_with_speech(wav_name):
+    """VAD: Count the number of frames in the given wav that seem to contain speech"""
     offset = 0
     speech_counter = 0
     frame_size = 30
@@ -87,29 +89,32 @@ def count_frames_with_speech(wav_name):
 
     return speech_counter
 
+
 def load_data():
     ret_data = []
 
     mapping = pd.ExcelFile("transcriptVoiceMap.xlsx").parse(0)
 
-    #load skipthoughts encoder
+    # load skipthoughts encoder
     model = st.load_model()
     encoder = st.Encoder(model)
     all_fst_transcript_vectors = encoder.encode([str(x) for x in mapping["fst transcript"]])
     all_snd_transcript_vectors = encoder.encode([str(x) for x in mapping["snd transcript"]])
 
-    #load voice emotions model
+    # load voice emotions model
     emotions_model = pickle.load(open("emotions_model.sav", 'rb'))
-    all_fst_wav_vectors = get_activations(emotions_model, np.array([get_emotions_vec(x) for x in mapping["fst wav name"]]))
-    all_snd_wav_vectors = get_activations(emotions_model, np.array([get_emotions_vec(x) for x in mapping["snd wav name"]]))
+    all_fst_wav_vectors = get_activations(emotions_model,
+                                          np.array([get_emotions_vec(x) for x in mapping["fst wav name"]]))
+    all_snd_wav_vectors = get_activations(emotions_model,
+                                          np.array([get_emotions_vec(x) for x in mapping["snd wav name"]]))
 
     for idx in range(len(mapping)):
-
         transcript_vec = all_fst_transcript_vectors[idx]
         snd_transcript_vec = all_snd_transcript_vectors[idx]
-        transcript_vec = np.concatenate((np.abs(transcript_vec - snd_transcript_vec), transcript_vec * snd_transcript_vec))
+        transcript_vec = np.concatenate(
+            (np.abs(transcript_vec - snd_transcript_vec), transcript_vec * snd_transcript_vec))
 
-        #load agent execution flag (0=executed, 1=not executed):
+        # load agent execution flag (0=executed, 1=not executed):
         output = mapping["output"][idx]
 
         emotions_vec = all_fst_wav_vectors[idx]
@@ -128,7 +133,9 @@ def load_data():
 
     return ret_data
 
+
 def split_data(k, all):
+    """Split the data into the appropriate number of folds and take the k-th fold as the test data"""
     train = []
     test = []
     split_point = int(len(all) * test_frac)
@@ -141,12 +148,13 @@ def split_data(k, all):
 
     return train, test
 
+
 def print_test_error(conf_matrix):
     for category in range(categories):
         print("category: ", category)
 
-        next = (category+1) % categories
-        next_next = (next+1) % categories
+        next = (category + 1) % categories
+        next_next = (next + 1) % categories
 
         true_positive = conf_matrix[category][category]
         false_negative = conf_matrix[category][next] + conf_matrix[category][next_next]
@@ -169,6 +177,7 @@ for k in range(0, kfold):
 
     train, test = split_data(k, all)
 
+    #build the SAIF graph
     tf.reset_default_graph()
 
     x1 = tf.placeholder(dtype=tf.float32, shape=[None, transcript_feat])
@@ -180,13 +189,13 @@ for k in range(0, kfold):
 
     #transcript + exe
     hid1_size = 30
-    W1 = tf.Variable(tf.truncated_normal([transcript_feat+1, hid1_size], stddev=0.1, seed=graph_seed))
+    W1 = tf.Variable(tf.truncated_normal([transcript_feat + 1, hid1_size], stddev=0.1, seed=graph_seed))
     b1 = tf.Variable(tf.constant(0.1, shape=[hid1_size]))
     z1 = tf.nn.relu(tf.matmul(tf.concat([x1, x2], 1), W1) + b1)
 
     #voice + vad
     hid2_size = 30
-    W2 = tf.Variable(tf.truncated_normal([voice_feat+1, hid2_size], stddev=0.1, seed=graph_seed))
+    W2 = tf.Variable(tf.truncated_normal([voice_feat + 1, hid2_size], stddev=0.1, seed=graph_seed))
     b2 = tf.Variable(tf.constant(0.1, shape=[hid2_size]))
     z2 = tf.nn.relu(tf.matmul(tf.concat([x3, x4], 1), W2) + b2)
 
@@ -199,7 +208,7 @@ for k in range(0, kfold):
     z3_drop = tf.nn.dropout(z3, keep_prob, seed=graph_seed)
 
     W = tf.Variable(tf.truncated_normal([hid3_size, categories], stddev=0.1, seed=graph_seed))
-    b = tf.Variable(tf.constant(0.0,shape=[categories]))
+    b = tf.Variable(tf.constant(0.0, shape=[categories]))
     z = tf.matmul(z3_drop, W) + b
 
     y = tf.nn.softmax(z)
@@ -211,6 +220,7 @@ for k in range(0, kfold):
     sess = tf.Session()
     sess.run(tf.global_variables_initializer())
 
+    #training
     for i in range(10000):
 
         numMiniBatches = math.ceil(len(train) / minibatch_size)
@@ -226,17 +236,21 @@ for k in range(0, kfold):
 
         ylabel = [item[4] for item in train[idx:lastIdx]]
 
-        [_, acc, loss_val] = sess.run([update, accuracy, loss], feed_dict={x1:xtranscript, x2:xoutput, x3:xvoice,
-                                                                    x4:xvad, y_: ylabel, keep_prob:graph_keep_prob})
+        [_, acc, loss_val] = sess.run([update, accuracy, loss], feed_dict={x1: xtranscript, x2: xoutput, x3: xvoice,
+                                                                           x4: xvad, y_: ylabel,
+                                                                           keep_prob: graph_keep_prob})
         if acc > 0.995:
             break
 
     tot_train_acc += acc
 
+    #test
     actuals = [item[4] for item in test]
     test_acc, predictions = sess.run([accuracy, y], feed_dict={x1: [item[0] for item in test],
-                        x2: [item[1] for item in test], x3: [item[2] for item in test], x4: [item[3] for item in test],
-                        y_: actuals, keep_prob:graph_keep_prob})
+                                                               x2: [item[1] for item in test],
+                                                               x3: [item[2] for item in test],
+                                                               x4: [item[3] for item in test],
+                                                               y_: actuals, keep_prob: graph_keep_prob})
 
     print("fold ", k, ": accuracy on test ", test_acc)
     tot_test_acc += test_acc
@@ -249,7 +263,7 @@ for k in range(0, kfold):
     print("cumulative confusion matrix: ")
     print(conf_matrix)
 
-print("final train accuracy: ", tot_train_acc/kfold)
-print("final test accuracy: ", tot_test_acc/kfold)
+print("final train accuracy: ", tot_train_acc / kfold)
+print("final test accuracy: ", tot_test_acc / kfold)
 
 print_test_error(conf_matrix)
